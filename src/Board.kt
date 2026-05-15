@@ -41,6 +41,26 @@ value class Piece(val raw: Short) {
             return Piece((type.value * owner.value).toShort())
         }
 
+        fun fromChar(ch: Char): Piece {
+            return when (ch) {
+                'P' -> of(PieceType.PAWN, Player.WHITE)
+                'N' -> of(PieceType.KNIGHT, Player.WHITE)
+                'B' -> of(PieceType.BISHOP, Player.WHITE)
+                'R' -> of(PieceType.ROOK, Player.WHITE)
+                'Q' -> of(PieceType.QUEEN, Player.WHITE)
+                'K' -> of(PieceType.KING, Player.WHITE)
+
+                'p' -> of(PieceType.PAWN, Player.BLACK)
+                'n' -> of(PieceType.KNIGHT, Player.BLACK)
+                'b' -> of(PieceType.BISHOP, Player.BLACK)
+                'r' -> of(PieceType.ROOK, Player.BLACK)
+                'q' -> of(PieceType.QUEEN, Player.BLACK)
+                'k' -> of(PieceType.KING, Player.BLACK)
+
+                else -> EMPTY
+            }
+        }
+
         // Empty square
         val EMPTY = Piece(0)
     }
@@ -61,7 +81,12 @@ value class Square(val raw: Int) {
     }
 
     companion object {
-        fun of(x: Int, y: Int) = (y shl 4) + x
+        fun of(x: Int, y: Int): Square = Square((y shl 4) + x)
+
+        fun fromString(string: String): Square = Square.of(
+            x = "ABCDEFGI".indexOf(string[0].lowercase()),
+            y = "87654321".indexOf(string[0])
+        )
     }
 }
 
@@ -81,7 +106,7 @@ value class BoardMeta(val raw: ULong) {
             Short get() = (raw and 0x00_00_00_00_00_00_FF_FFuL).toShort()
 
     val halfMove:
-            Byte get() = ((raw and 0x00_00_00_00_00_FF_00_00uL) shr 16).toByte()
+            Byte get() = ((raw and 0x00_00_00_00_00_FF_00_00uL) shr 16).coerceIn(0uL, 50uL).toByte()
 
     val toMove:
             Player get() = when {
@@ -109,30 +134,164 @@ value class BoardMeta(val raw: ULong) {
             Square get() = Square(((raw and 0xFF_00_00_00_00_00_00_00uL) shr 56).toInt())
 
     companion object {
-        // WTF
+        private fun Boolean.toULong(mask: ULong) = if (this) mask else 0uL
+
         fun of(
-            fullMove: Short, halfMove: Byte, toMove: Player, enPassantSquare: Square,
-            whiteKingsideCastle: Boolean, whiteQueensideCastle: Boolean,
-            blackKingsideCastle: Boolean, blackQueensideCastle: Boolean,
-            whiteKing: Square, blackKing: Square
+            fullMove: Short,
+            halfMove: Byte,
+            toMove: Player,
+            enPassantSquare: Square,
+            whiteKingsideCastle: Boolean,
+            whiteQueensideCastle: Boolean,
+            blackKingsideCastle: Boolean,
+            blackQueensideCastle: Boolean,
+            whiteKing: Square,
+            blackKing: Square
         ): BoardMeta {
-            return BoardMeta(fullMove.toULong() or (halfMove.toULong() shl 16) or when (toMove) {
-                Player.WHITE -> 0x00_00_01_00_00_00_00_00uL
-                Player.BLACK -> 0x00_00_02_00_00_00_00_00uL
-                else -> 0uL
-            } or (enPassantSquare.raw.toULong() shl 32) or
-                    when (whiteKingsideCastle) {true -> 0x00_00_01_00_00_00_00_00uL; else -> 0uL} or
-                    when (whiteQueensideCastle) {true -> 0x00_00_02_00_00_00_00_00uL; else -> 0uL} or
-                    when (blackKingsideCastle) {true -> 0x00_00_04_00_00_00_00_00uL; else -> 0uL} or
-                    when (blackQueensideCastle) {true -> 0x00_00_08_00_00_00_00_00uL; else -> 0uL} or
-                whiteKing.raw.toULong() shl 48 or blackKing.raw.toULong() shl 56
+            val toMoveBits = when (toMove) {
+                Player.WHITE -> 0x01uL
+                Player.BLACK -> 0x02uL
+                else -> 0x00uL
+            }
+            return BoardMeta(
+                fullMove.toULong()                                          // B0–1 : full move
+                        or (halfMove.toULong() shl 16)                             // B1   : half move  (if re-laid out)
+                        or (toMoveBits shl 24)                                    // B3   : to move
+                        or (enPassantSquare.raw.toULong() shl 32)                 // B4   : en passant
+                        or whiteKingsideCastle.toULong(0x01uL shl 40)      // B2   : WK castle
+                        or whiteQueensideCastle.toULong(0x02uL shl 40)     // B2   : WQ castle
+                        or blackKingsideCastle.toULong(0x04uL shl 40)      // B2   : BK castle
+                        or blackQueensideCastle.toULong(0x08uL shl 40)     // B2   : BQ castle
+                        or (whiteKing.raw.toULong() shl 48)                       // B6   : white king
+                        or (blackKing.raw.toULong() shl 56)                       // B7   : black king
+            )
+        }
+
+        fun fromFen(fen: String, whiteKing: Square, blackKing: Square): BoardMeta {
+            val (toPlay, castlingAvailability, enPassantSquare, halfMoveClock, fullMoveClock) =
+                fen.split(' ', limit = 5)
+
+            val toPlayPlayer = when (toPlay.lowercase()) {
+                "w" -> Player.WHITE
+                "b" -> Player.BLACK
+                else -> Player.NONE
+            }
+
+            var whiteKingsideCastle = false
+            var whiteQueensideCastle = false
+            var blackKingsideCastle = false
+            var blackQueensideCastle = false
+
+            for (ch in castlingAvailability.toCharArray()) {
+                when (ch) {
+                    'K' -> whiteKingsideCastle = true
+                    'Q' -> whiteQueensideCastle = true
+                    'k' -> blackKingsideCastle = true
+                    'q' -> blackQueensideCastle = true
+                }
+            }
+
+            return BoardMeta.of(
+                fullMove = fullMoveClock.toShort(),
+                halfMove = halfMoveClock.toByte(),
+                toMove = toPlayPlayer,
+                enPassantSquare = Square.fromString(enPassantSquare),
+                whiteKingsideCastle = whiteKingsideCastle,
+                whiteQueensideCastle = whiteQueensideCastle,
+                blackKingsideCastle = blackKingsideCastle,
+                blackQueensideCastle = blackQueensideCastle,
+                whiteKing = whiteKing,
+                blackKing = blackKing
             )
         }
     }
 }
 
+@JvmInline
+value class BoardData(val raw: ShortArray) {
+    companion object {
+        fun fromFen(fen: String): Triple<BoardData, Square, Square> {
+            val new = BoardData(ShortArray(64))
+            var whiteKing: Square = Square(0)
+            var blackKing: Square = Square(0)
+            val ranks = fen.split('/') // Single quotes: Char
+            for (rank in 0..7) {
+                var file = 0
+                for (ch in ranks[rank].toCharArray()) {
+                    if (ch.isDigit()) {
+                        file += ch.toString().toInt() // not pretty
+                    } else {
+                        new[file, rank] = Piece.fromChar(ch).raw
+                        when (ch) {
+                            'K' -> whiteKing = Square.of(file, rank)
+                            'k' -> blackKing = Square.of(file, rank)
+                        }
+                        file += 1
+                    }
+                }
+            }
 
 
-class Board(val data: ShortArray, var toMove: Player) {
+            return Triple(new, whiteKing, blackKing)
+        }
+    }
 
+    operator fun get(x: Int, y: Int): Short {
+        if (!(x in 0..7 && y in 0..7)) {
+            return 0
+        }
+
+        return raw[x + (y * 8)]
+    }
+
+    operator fun get(square: Square): Short {
+        return get(square.x, square.y)
+    }
+
+    operator fun set(x: Int, y: Int, value: Short) {
+        if (!(x in 0..7 && y in 0..7)) {
+            return
+        }
+
+        raw[x + (y * 8)] = value
+    }
+
+    operator fun set(square: Square, value: Short) {
+        return set(square.x, square.y, value)
+    }
+
+     fun atUnsafe(x: Int, y: Int): Short {
+        return raw[x + (y * 8)]
+    }
+
+    fun at(x: Int, y: Int): Short {
+        return get(x, y)
+    }
+
+    fun at(square: Square): Short {
+        return get(square.x, square.y)
+    }
+}
+
+
+class Board(val data: BoardData, val meta: BoardMeta) {
+    companion object {
+        fun fromFen(fen: String): Board {
+            val (boardStr, metaStr) = fen.split(' ', limit = 2)
+            val (boardData, whiteKing, blackKing) = BoardData.fromFen(boardStr)
+            val boardMeta = BoardMeta.fromFen(metaStr, whiteKing, blackKing)
+            return Board(boardData, boardMeta)
+        }
+
+        fun startingPosition(): Board {
+            return fromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+        }
+    }
+
+    override fun toString(): String {
+        // TODO: fix
+        val str = "Board\n  A B C D E F G H I\n\n"
+
+        return  str
+    }
 }
